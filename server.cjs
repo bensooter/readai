@@ -1,37 +1,62 @@
 const express = require("express");
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 const cors = require("cors");
+const fs = require("fs");
+const path = require("path");
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const THREADS_FILE = path.join(__dirname, "threads.json");
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
 if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-  console.error("❌ Missing OPENAI_API_KEY or ASSISTANT_ID in environment");
+  console.error("❌ Missing OPENAI_API_KEY or ASSISTANT_ID");
   process.exit(1);
 }
 
-app.use(cors()); // Allow all origins – good for testing
+app.use(cors());
 app.use(express.json());
-app.use(express.static("public")); // optional, in case you add frontend later
+app.use(express.static("public"));
 
-let sessions = {}; // in-memory user thread tracking
+// Load or initialize thread map
+let threadMap = {};
+if (fs.existsSync(THREADS_FILE)) {
+  threadMap = JSON.parse(fs.readFileSync(THREADS_FILE, "utf8"));
+}
+
+// Save thread map to file
+function saveThreads() {
+  fs.writeFileSync(THREADS_FILE, JSON.stringify(threadMap, null, 2));
+}
+
+// Reset a user’s thread
+app.post("/api/reset", (req, res) => {
+  const { userId } = req.body;
+  if (userId && threadMap[userId]) {
+    delete threadMap[userId];
+    saveThreads();
+    console.log(`🔁 Thread reset for ${userId}`);
+    return res.json({ success: true });
+  }
+  res.json({ success: false });
+});
 
 app.post("/api/message", async (req, res) => {
   try {
     const { userId, message } = req.body;
-
     if (!userId || !message) {
       return res.status(400).json({ error: "Missing userId or message" });
     }
 
-    console.log(`📩 Received message from ${userId}: "${message}"`);
+    console.log(`📩 ${userId}: ${message}`);
 
-    // Step 1: Create thread if needed
-    if (!sessions[userId]) {
+    let threadId = threadMap[userId];
+
+    // Create new thread if needed
+    if (!threadId) {
       const threadRes = await fetch("https://api.openai.com/v1/threads", {
         method: "POST",
         headers: {
@@ -41,12 +66,12 @@ app.post("/api/message", async (req, res) => {
         }
       });
       const threadData = await threadRes.json();
-      sessions[userId] = { thread_id: threadData.id };
+      threadId = threadData.id;
+      threadMap[userId] = threadId;
+      saveThreads();
     }
 
-    const threadId = sessions[userId].thread_id;
-
-    // Step 2: Add message
+    // Add message to thread
     await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
       method: "POST",
       headers: {
@@ -57,9 +82,7 @@ app.post("/api/message", async (req, res) => {
       body: JSON.stringify({ role: "user", content: message })
     });
 
-    console.log(`📨 Added message to thread ${threadId}: ${message}`);
-
-    // Step 3: Run assistant
+    // Run assistant
     const runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -73,9 +96,9 @@ app.post("/api/message", async (req, res) => {
     const runData = await runRes.json();
     const runId = runData.id;
 
-    // Step 4: Poll for completion
-    let runStatus = runData.status;
-    while (runStatus !== "completed" && runStatus !== "failed") {
+    // Poll for completion
+    let status = runData.status;
+    while (status !== "completed" && status !== "failed") {
       await new Promise(r => setTimeout(r, 1000));
       const pollRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
         headers: {
@@ -84,11 +107,11 @@ app.post("/api/message", async (req, res) => {
         }
       });
       const pollData = await pollRes.json();
-      runStatus = pollData.status;
+      status = pollData.status;
     }
 
-    // Step 5: Get assistant reply
-    if (runStatus === "completed") {
+    // Get assistant reply
+    if (status === "completed") {
       const msgRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -96,23 +119,21 @@ app.post("/api/message", async (req, res) => {
         }
       });
       const msgData = await msgRes.json();
-      const assistantReply = msgData.data
+      const reply = msgData.data
         .reverse()
         .find(m => m.role === "assistant")?.content[0]?.text?.value;
 
-      console.log(`🤖 Assistant reply to ${userId}: "${assistantReply}"`);
-
-      res.json({ reply: assistantReply || "No reply found." });
+      console.log(`🤖 Assistant: ${reply}`);
+      res.json({ reply: reply || "No reply found." });
     } else {
-      console.error(`⚠️ Run failed for user ${userId}`);
       res.status(500).json({ error: "Assistant run failed." });
     }
   } catch (err) {
-    console.error("❌ Error in /api/message:", err);
+    console.error("❌ Error:", err);
     res.status(500).json({ error: "Internal server error", details: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ ReadAI Assistant server running on port ${PORT}`);
+  console.log(`✅ Server running on port ${PORT}`);
 });
