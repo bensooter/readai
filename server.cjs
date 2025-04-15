@@ -13,7 +13,7 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID = process.env.ASSISTANT_ID;
 
 if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-  console.error("❌ Missing OPENAI_API_KEY or ASSISTANT_ID");
+  console.error("❌ Missing OPENAI_API_KEY or ASSISTANT_ID in environment");
   process.exit(1);
 }
 
@@ -27,23 +27,23 @@ if (fs.existsSync(THREADS_FILE)) {
   threadMap = JSON.parse(fs.readFileSync(THREADS_FILE, "utf8"));
 }
 
-// Save thread map to file
 function saveThreads() {
   fs.writeFileSync(THREADS_FILE, JSON.stringify(threadMap, null, 2));
 }
 
-// Reset a user’s thread
+// Reset conversation
 app.post("/api/reset", (req, res) => {
   const { userId } = req.body;
   if (userId && threadMap[userId]) {
     delete threadMap[userId];
     saveThreads();
-    console.log(`🔁 Thread reset for ${userId}`);
+    console.log(`🔁 Reset thread for ${userId}`);
     return res.json({ success: true });
   }
   res.json({ success: false });
 });
 
+// Send message
 app.post("/api/message", async (req, res) => {
   try {
     const { userId, message } = req.body;
@@ -51,7 +51,7 @@ app.post("/api/message", async (req, res) => {
       return res.status(400).json({ error: "Missing userId or message" });
     }
 
-    console.log(`📩 ${userId}: ${message}`);
+    console.log(`📩 ${userId}: "${message}"`);
 
     let threadId = threadMap[userId];
 
@@ -70,6 +70,8 @@ app.post("/api/message", async (req, res) => {
       threadMap[userId] = threadId;
       saveThreads();
     }
+
+    console.log(`🧵 Using thread: ${threadId}`);
 
     // Add message to thread
     await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
@@ -95,9 +97,9 @@ app.post("/api/message", async (req, res) => {
 
     const runData = await runRes.json();
     const runId = runData.id;
-
-    // Poll for completion
     let status = runData.status;
+
+    // Poll for run completion
     while (status !== "completed" && status !== "failed") {
       await new Promise(r => setTimeout(r, 1000));
       const pollRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs/${runId}`, {
@@ -110,7 +112,7 @@ app.post("/api/message", async (req, res) => {
       status = pollData.status;
     }
 
-    // Get assistant reply
+    // Get assistant's reply
     if (status === "completed") {
       const msgRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/messages`, {
         headers: {
@@ -119,21 +121,27 @@ app.post("/api/message", async (req, res) => {
         }
       });
       const msgData = await msgRes.json();
-      const reply = msgData.data
-        .reverse()
-        .find(m => m.role === "assistant")?.content[0]?.text?.value;
 
-      console.log(`🤖 Assistant: ${reply}`);
-      res.json({ reply: reply || "No reply found." });
+      const assistantMessages = msgData.data
+        .filter(m => m.role === "assistant")
+        .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+
+      const reply = assistantMessages.length > 0
+        ? assistantMessages[assistantMessages.length - 1].content[0]?.text?.value
+        : "No assistant reply found.";
+
+      console.log(`🤖 Assistant: "${reply}"`);
+      res.json({ reply });
     } else {
+      console.error("❌ Assistant run failed.");
       res.status(500).json({ error: "Assistant run failed." });
     }
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ Error in /api/message:", err);
     res.status(500).json({ error: "Internal server error", details: err.message });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`✅ Server running on port ${PORT}`);
+  console.log(`✅ ReadAI Assistant running on port ${PORT}`);
 });
