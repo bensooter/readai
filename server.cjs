@@ -57,6 +57,8 @@ app.post("/api/message", async (req, res) => {
       body: JSON.stringify({ role: "user", content: message })
     });
 
+    console.log(`📨 Added message to thread ${threadId}: ${message}`);
+
     // Step 3: Run assistant
     const runRes = await fetch(`https://api.openai.com/v1/threads/${threadId}/runs`, {
       method: "POST",
